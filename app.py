@@ -1,12 +1,15 @@
-from flask import Flask, render_template, request, redirect, send_file
+from flask import Flask, render_template, request, redirect, send_file, flash, session
 import sqlite3
 from datetime import datetime
 import io
+from werkzeug.security import generate_password_hash, check_password_hash
 
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 
 app = Flask(__name__)
+app.secret_key = "khatabook-secret-key"
+
 DB = "khatabook.db"
 
 # ---------- DB ----------
@@ -17,58 +20,145 @@ def get_db():
 
 def init_db():
     conn = get_db()
+
+    # USERS
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            email TEXT UNIQUE,
+            password TEXT
+        )
+    """)
+
+    # ENTRIES
     conn.execute("""
         CREATE TABLE IF NOT EXISTS entries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
             person TEXT,
             amount REAL,
             type TEXT,
             date TEXT
         )
     """)
+
     conn.commit()
     conn.close()
 
 init_db()
 
+# ---------- DEFAULT ----------
+@app.route("/")
+def home():
+    return redirect("/register")
+
+# ---------- REGISTER ----------
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        name = request.form["name"]
+        email = request.form["email"]
+        password = generate_password_hash(request.form["password"])
+
+        try:
+            conn = get_db()
+            conn.execute(
+                "INSERT INTO users (name, email, password) VALUES (?, ?, ?)",
+                (name, email, password)
+            )
+            conn.commit()
+            conn.close()
+
+            flash("Registration successful. Please login.", "success")
+            return redirect("/login")
+
+        except:
+            flash("Email already exists", "danger")
+
+    return render_template("register.html")
+
+# ---------- LOGIN ----------
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        email = request.form["email"]
+        password = request.form["password"]
+
+        conn = get_db()
+        user = conn.execute(
+            "SELECT * FROM users WHERE email=?", (email,)
+        ).fetchone()
+        conn.close()
+
+        if user and check_password_hash(user["password"], password):
+            session["user_id"] = user["id"]
+            session["user_name"] = user["name"]
+            return redirect("/dashboard")
+
+        flash("Invalid login details", "danger")
+
+    return render_template("login.html")
+
+# ---------- LOGOUT ----------
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/login")
+
 # ---------- DASHBOARD ----------
-@app.route("/", methods=["GET", "POST"])
-def index():
+@app.route("/dashboard", methods=["GET", "POST"])
+def dashboard():
+    if "user_id" not in session:
+        return redirect("/login")
+
     conn = get_db()
     c = conn.cursor()
 
     # ADD ENTRY
     if request.method == "POST":
-        entry_date = request.form.get("date")
-        if not entry_date:
-            entry_date = datetime.now().strftime("%Y-%m-%d")
+        entry_date = request.form.get("date") or datetime.now().strftime("%Y-%m-%d")
 
         c.execute(
-            "INSERT INTO entries (person, amount, type, date) VALUES (?, ?, ?, ?)",
+            "INSERT INTO entries (user_id, person, amount, type, date) VALUES (?, ?, ?, ?, ?)",
             (
+                session["user_id"],
                 request.form["person"],
-                request.form["amount"],
+                float(request.form["amount"]),
                 request.form["type"],
                 entry_date
             )
         )
         conn.commit()
-        conn.close()
-        return redirect("/")
+        return redirect("/dashboard")
 
-    # FILTER (ONLY FOR SCREEN)
-    from_date = request.args.get("from_date")
-    to_date = request.args.get("to_date")
+    entries = c.execute(
+        "SELECT * FROM entries WHERE user_id=? ORDER BY date ASC, id ASC",
+        (session["user_id"],)
+    ).fetchall()
 
-    query = "SELECT * FROM entries"
-    params = []
+    running_balance = 0
+    ledger_entries = []
 
-    if from_date and to_date:
-        query += " WHERE date BETWEEN ? AND ?"
-        params = [from_date, to_date]
+    for e in entries:
+        credit = "-"
+        debit = "-"
 
-    query += " ORDER BY date DESC"
-    entries = c.execute(query, params).fetchall()
+        if e["type"] == "IN":
+            running_balance += e["amount"]
+            credit = e["amount"]
+        else:
+            running_balance -= e["amount"]
+            debit = e["amount"]
+
+        ledger_entries.append({
+            "id": e["id"],
+            "date": e["date"],
+            "person": e["person"],
+            "credit": credit,
+            "debit": debit,
+            "balance": running_balance
+        })
 
     total_in = sum(e["amount"] for e in entries if e["type"] == "IN")
     total_out = sum(e["amount"] for e in entries if e["type"] == "OUT")
@@ -80,69 +170,34 @@ def index():
 
     return render_template(
         "dashboard.html",
-        entries=entries,
+        entries=ledger_entries,
         total_in=total_in,
         total_out=total_out,
         balance=balance,
-        from_date=from_date,
-        to_date=to_date,
-        today=today
+        today=today,
+        user=session["user_name"],
+        datetime=datetime
     )
 
-# ---------- PDF DOWNLOAD (ALL ENTRIES ONLY) ----------
-@app.route("/download-pdf")
-def download_pdf():
+# ---------- DELETE ----------
+@app.route("/delete", methods=["POST"])
+def delete_entry():
+    if "user_id" not in session:
+        return redirect("/login")
+
+    entry_id = request.form["id"]
+
     conn = get_db()
-    c = conn.cursor()
-
-    entries = c.execute(
-        "SELECT date, person, amount, type FROM entries ORDER BY date ASC"
-    ).fetchall()
-
+    conn.execute(
+        "DELETE FROM entries WHERE id=? AND user_id=?",
+        (entry_id, session["user_id"])
+    )
+    conn.commit()
     conn.close()
 
-    buffer = io.BytesIO()
-    pdf = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
-
-    y = height - 40
-
-    pdf.setFont("Helvetica-Bold", 14)
-    pdf.drawString(40, y, "Business KhataBook - All Entries")
-    y -= 30
-
-    pdf.setFont("Helvetica-Bold", 10)
-    pdf.drawString(40, y, "Date")
-    pdf.drawString(130, y, "Person")
-    pdf.drawString(300, y, "Amount")
-    pdf.drawString(380, y, "Type")
-    y -= 20
-
-    pdf.setFont("Helvetica", 10)
-
-    for e in entries:
-        if y < 40:
-            pdf.showPage()
-            pdf.setFont("Helvetica", 10)
-            y = height - 40
-
-        pdf.drawString(40, y, e["date"])
-        pdf.drawString(130, y, e["person"])
-        pdf.drawString(300, y, f"₹ {e['amount']}")
-        pdf.drawString(380, y, e["type"])
-        y -= 15
-
-    pdf.save()
-    buffer.seek(0)
-
-    return send_file(
-        buffer,
-        as_attachment=True,
-        download_name="khatabook_all_entries.pdf",
-        mimetype="application/pdf"
-    )
+    flash("Entry deleted", "danger")
+    return redirect("/dashboard")
 
 # ---------- RUN ----------
 if __name__ == "__main__":
-    app.run()
-
+    app.run(debug=True)
