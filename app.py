@@ -13,11 +13,12 @@ app = Flask(__name__)
 app.secret_key = "khatabook-secret-key"
 DB = "khatabook.db"
 
-# ---------- FONT ----------
+# ---------- FONT (RENDER SAFE) ----------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FONT_PATH = os.path.join(BASE_DIR, "static", "fonts", "DejaVuSans.ttf")
+
 pdfmetrics.registerFont(TTFont("DejaVu", FONT_PATH))
-pdfmetrics.registerFont(TTFont("DejaVu-Bold", FONT_PATH))
+# ⚠️ Bold font intentionally NOT registered (to avoid Render crash)
 
 # ---------- DB ----------
 def get_db():
@@ -90,6 +91,7 @@ def login():
             session["user_id"] = user["id"]
             session["user_name"] = user["name"]
             return redirect("/dashboard")
+
         flash("Invalid login", "danger")
     return render_template("login.html")
 
@@ -146,11 +148,11 @@ def dashboard():
 
     conn.close()
     return render_template(
-    "dashboard.html",
-    entries=ledger,
-    user=session["user_name"],
-    datetime=datetime
-)
+        "dashboard.html",
+        entries=ledger,
+        user=session["user_name"],
+        datetime=datetime
+    )
 
 # ---------- PDF ----------
 @app.route("/download-pdf")
@@ -165,7 +167,6 @@ def download_pdf():
     ).fetchall()
     conn.close()
 
-    # ----- LEDGER DATA -----
     balance = 0
     data = []
     for r in rows:
@@ -183,8 +184,8 @@ def download_pdf():
     c = canvas.Canvas(file_path, pagesize=A4)
     width, height = A4
 
-    # ----- TITLE (BOLD + CENTER) -----
-    c.setFont("Helvetica-Bold", 18)
+    # ----- TITLE (FONT SIZE USED AS BOLD EFFECT) -----
+    c.setFont("DejaVu", 18)
     c.drawCentredString(width / 2, height - 60, "Netlink Report")
 
     # ----- TABLE -----
@@ -197,18 +198,18 @@ def download_pdf():
     for w in col_w:
         x.append(x[-1] + w)
 
-    # ----- HEADINGS (BOLD) -----
+    # ----- HEADINGS -----
+    c.setFont("DejaVu", 11)
     headers = ["Date", "Person", "Credit", "Debit", "Balance"]
-    c.setFont("Helvetica-Bold", 11)
 
     y = start_y
     for i, h in enumerate(headers):
         c.drawCentredString((x[i] + x[i+1]) / 2, y, h)
 
-    c.line(x[0], y-10, x[-1], y-10)
+    c.line(x[0], y - 10, x[-1], y - 10)
 
     # ----- ROWS -----
-    c.setFont("Helvetica", 10)
+    c.setFont("DejaVu", 10)
     y -= row_h
 
     for row in data:
@@ -219,9 +220,9 @@ def download_pdf():
     # ----- BORDERS -----
     bottom = y + row_h - 10
     for xi in x:
-        c.line(xi, start_y+10, xi, bottom)
+        c.line(xi, start_y + 10, xi, bottom)
 
-    c.rect(x[0], bottom, x[-1]-x[0], (start_y+10)-bottom)
+    c.rect(x[0], bottom, x[-1] - x[0], (start_y + 10) - bottom)
 
     c.save()
     return send_file(file_path, as_attachment=True)
