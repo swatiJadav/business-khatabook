@@ -1,0 +1,6 @@
+khatabook.db
+database.db
+*.db
+__pycache__/
+*.pyc
+netlink_report.pdf
