@@ -16,7 +16,17 @@ DB = "khatabook.db"
 # ---------- FONT (RENDER SAFE) ----------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FONT_PATH = os.path.join(BASE_DIR, "static", "fonts", "DejaVuSans.ttf")
-pdfmetrics.registerFont(TTFont("DejaVu", FONT_PATH))
+
+FONT_NAME = "Helvetica"   # default safe font
+
+if os.path.exists(FONT_PATH):
+    try:
+        pdfmetrics.registerFont(TTFont("DejaVu", FONT_PATH))
+        FONT_NAME = "DejaVu"
+    except Exception as e:
+        print("Font load failed, using Helvetica:", e)
+else:
+    print("Font file not found, using Helvetica")
 
 # ---------- DB ----------
 def get_db():
@@ -165,6 +175,7 @@ def dashboard():
     )
 
 # ---------- PDF ----------
+# ---------- PDF ----------
 @app.route("/download-pdf")
 def download_pdf():
     if "user_id" not in session:
@@ -195,9 +206,11 @@ def download_pdf():
     c = canvas.Canvas(file_path, pagesize=A4)
     width, height = A4
 
-    c.setFont("DejaVu", 18)
+    # ----- TITLE -----
+    c.setFont(FONT_NAME, 18)
     c.drawCentredString(width / 2, height - 60, "Netlink Report")
 
+    # ----- TABLE SETUP -----
     start_x = 60
     start_y = height - 120
     row_h = 28
@@ -207,8 +220,9 @@ def download_pdf():
     for w in col_w:
         x.append(x[-1] + w)
 
+    # ----- HEADERS -----
     headers = ["Date", "Person", "Credit", "Debit", "Balance"]
-    c.setFont("DejaVu", 11)
+    c.setFont(FONT_NAME, 11)
 
     y = start_y
     for i, h in enumerate(headers):
@@ -216,7 +230,8 @@ def download_pdf():
 
     c.line(x[0], y - 8, x[-1], y - 8)
 
-    c.setFont("DejaVu", 10)
+    # ----- ROWS -----
+    c.setFont(FONT_NAME, 10)
     y -= row_h
 
     for row in data:
@@ -224,6 +239,7 @@ def download_pdf():
             c.drawCentredString((x[i] + x[i+1]) / 2, y, val)
         y -= row_h
 
+    # ----- BORDERS -----
     bottom = y + row_h - 8
     for xi in x:
         c.line(xi, start_y + 8, xi, bottom)
