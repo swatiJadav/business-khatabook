@@ -1,6 +1,6 @@
 from flask import Flask, render_template, request, redirect, send_file, flash, session
 import sqlite3
-from datetime import datetime
+from datetime import datetime, date
 from werkzeug.security import generate_password_hash, check_password_hash
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
@@ -16,9 +16,7 @@ DB = "khatabook.db"
 # ---------- FONT (RENDER SAFE) ----------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FONT_PATH = os.path.join(BASE_DIR, "static", "fonts", "DejaVuSans.ttf")
-
 pdfmetrics.registerFont(TTFont("DejaVu", FONT_PATH))
-# ⚠️ Bold font intentionally NOT registered (to avoid Render crash)
 
 # ---------- DB ----------
 def get_db():
@@ -100,6 +98,7 @@ def logout():
     session.clear()
     return redirect("/login")
 
+# ---------- DASHBOARD ----------
 @app.route("/dashboard", methods=["GET", "POST"])
 def dashboard():
     if "user_id" not in session:
@@ -108,6 +107,7 @@ def dashboard():
     conn = get_db()
     cur = conn.cursor()
 
+    # ADD ENTRY
     if request.method == "POST":
         cur.execute(
             "INSERT INTO entries (user_id,person,amount,type,date) VALUES (?,?,?,?,?)",
@@ -116,7 +116,7 @@ def dashboard():
                 request.form["person"],
                 float(request.form["amount"]),
                 request.form["type"],
-                request.form.get("date") or datetime.now().strftime("%Y-%m-%d")
+                request.form.get("date") or date.today().isoformat()
             )
         )
         conn.commit()
@@ -127,15 +127,21 @@ def dashboard():
         (session["user_id"],)
     ).fetchall()
 
+    # CALCULATIONS
     running = 0
+    total_credit = 0
+    total_debit = 0
     ledger = []
+
     for r in rows:
         credit = debit = "-"
         if r["type"] == "IN":
             running += r["amount"]
+            total_credit += r["amount"]
             credit = r["amount"]
         else:
             running -= r["amount"]
+            total_debit += r["amount"]
             debit = r["amount"]
 
         ledger.append({
@@ -147,11 +153,15 @@ def dashboard():
         })
 
     conn.close()
+
     return render_template(
         "dashboard.html",
         entries=ledger,
         user=session["user_name"],
-        datetime=datetime
+        total_credit=total_credit,
+        total_debit=total_debit,
+        balance=running,
+        today=date.today().isoformat()
     )
 
 # ---------- PDF ----------
@@ -162,13 +172,14 @@ def download_pdf():
 
     conn = get_db()
     rows = conn.execute(
-        "SELECT * FROM entries WHERE user_id=? ORDER BY date, id",
+        "SELECT * FROM entries WHERE user_id=? ORDER BY date,id",
         (session["user_id"],)
     ).fetchall()
     conn.close()
 
     balance = 0
     data = []
+
     for r in rows:
         credit = debit = "-"
         if r["type"] == "IN":
@@ -184,31 +195,27 @@ def download_pdf():
     c = canvas.Canvas(file_path, pagesize=A4)
     width, height = A4
 
-    # ----- TITLE (FONT SIZE USED AS BOLD EFFECT) -----
     c.setFont("DejaVu", 18)
     c.drawCentredString(width / 2, height - 60, "Netlink Report")
 
-    # ----- TABLE -----
     start_x = 60
     start_y = height - 120
-    row_h = 30
-
+    row_h = 28
     col_w = [90, 120, 90, 90, 100]
+
     x = [start_x]
     for w in col_w:
         x.append(x[-1] + w)
 
-    # ----- HEADINGS -----
-    c.setFont("DejaVu", 11)
     headers = ["Date", "Person", "Credit", "Debit", "Balance"]
+    c.setFont("DejaVu", 11)
 
     y = start_y
     for i, h in enumerate(headers):
         c.drawCentredString((x[i] + x[i+1]) / 2, y, h)
 
-    c.line(x[0], y - 10, x[-1], y - 10)
+    c.line(x[0], y - 8, x[-1], y - 8)
 
-    # ----- ROWS -----
     c.setFont("DejaVu", 10)
     y -= row_h
 
@@ -217,12 +224,11 @@ def download_pdf():
             c.drawCentredString((x[i] + x[i+1]) / 2, y, val)
         y -= row_h
 
-    # ----- BORDERS -----
-    bottom = y + row_h - 10
+    bottom = y + row_h - 8
     for xi in x:
-        c.line(xi, start_y + 10, xi, bottom)
+        c.line(xi, start_y + 8, xi, bottom)
 
-    c.rect(x[0], bottom, x[-1] - x[0], (start_y + 10) - bottom)
+    c.rect(x[0], bottom, x[-1] - x[0], (start_y + 8) - bottom)
 
     c.save()
     return send_file(file_path, as_attachment=True)
