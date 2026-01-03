@@ -1,16 +1,23 @@
 from flask import Flask, render_template, request, redirect, send_file, flash, session
 import sqlite3
 from datetime import datetime
-import io
 from werkzeug.security import generate_password_hash, check_password_hash
-
-from reportlab.lib.pagesizes import A4
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+import os
 
+# ---------- APP ----------
 app = Flask(__name__)
 app.secret_key = "khatabook-secret-key"
-
 DB = "khatabook.db"
+
+# ---------- FONT ----------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FONT_PATH = os.path.join(BASE_DIR, "static", "fonts", "DejaVuSans.ttf")
+pdfmetrics.registerFont(TTFont("DejaVu", FONT_PATH))
+pdfmetrics.registerFont(TTFont("DejaVu-Bold", FONT_PATH))
 
 # ---------- DB ----------
 def get_db():
@@ -20,8 +27,6 @@ def get_db():
 
 def init_db():
     conn = get_db()
-
-    # USERS
     conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -30,8 +35,6 @@ def init_db():
             password TEXT
         )
     """)
-
-    # ENTRIES
     conn.execute("""
         CREATE TABLE IF NOT EXISTS entries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,161 +45,186 @@ def init_db():
             date TEXT
         )
     """)
-
     conn.commit()
     conn.close()
 
 init_db()
 
-# ---------- DEFAULT ----------
+# ---------- ROUTES ----------
 @app.route("/")
 def home():
-    return redirect("/register")
+    return redirect("/login")
 
-# ---------- REGISTER ----------
 @app.route("/register", methods=["GET", "POST"])
 def register():
     if request.method == "POST":
-        name = request.form["name"]
-        email = request.form["email"]
-        password = generate_password_hash(request.form["password"])
-
         try:
             conn = get_db()
             conn.execute(
-                "INSERT INTO users (name, email, password) VALUES (?, ?, ?)",
-                (name, email, password)
+                "INSERT INTO users (name,email,password) VALUES (?,?,?)",
+                (
+                    request.form["name"],
+                    request.form["email"],
+                    generate_password_hash(request.form["password"])
+                )
             )
             conn.commit()
             conn.close()
-
-            flash("Registration successful. Please login.", "success")
+            flash("Registration successful", "success")
             return redirect("/login")
-
         except:
             flash("Email already exists", "danger")
-
     return render_template("register.html")
 
-# ---------- LOGIN ----------
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        email = request.form["email"]
-        password = request.form["password"]
-
         conn = get_db()
         user = conn.execute(
-            "SELECT * FROM users WHERE email=?", (email,)
+            "SELECT * FROM users WHERE email=?",
+            (request.form["email"],)
         ).fetchone()
         conn.close()
 
-        if user and check_password_hash(user["password"], password):
+        if user and check_password_hash(user["password"], request.form["password"]):
             session["user_id"] = user["id"]
             session["user_name"] = user["name"]
             return redirect("/dashboard")
-
-        flash("Invalid login details", "danger")
-
+        flash("Invalid login", "danger")
     return render_template("login.html")
 
-# ---------- LOGOUT ----------
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect("/login")
 
-# ---------- DASHBOARD ----------
 @app.route("/dashboard", methods=["GET", "POST"])
 def dashboard():
     if "user_id" not in session:
         return redirect("/login")
 
     conn = get_db()
-    c = conn.cursor()
+    cur = conn.cursor()
 
-    # ADD ENTRY
     if request.method == "POST":
-        entry_date = request.form.get("date") or datetime.now().strftime("%Y-%m-%d")
-
-        c.execute(
-            "INSERT INTO entries (user_id, person, amount, type, date) VALUES (?, ?, ?, ?, ?)",
+        cur.execute(
+            "INSERT INTO entries (user_id,person,amount,type,date) VALUES (?,?,?,?,?)",
             (
                 session["user_id"],
                 request.form["person"],
                 float(request.form["amount"]),
                 request.form["type"],
-                entry_date
+                request.form.get("date") or datetime.now().strftime("%Y-%m-%d")
             )
         )
         conn.commit()
         return redirect("/dashboard")
 
-    entries = c.execute(
-        "SELECT * FROM entries WHERE user_id=? ORDER BY date ASC, id ASC",
+    rows = cur.execute(
+        "SELECT * FROM entries WHERE user_id=? ORDER BY date,id",
         (session["user_id"],)
     ).fetchall()
 
-    running_balance = 0
-    ledger_entries = []
-
-    for e in entries:
-        credit = "-"
-        debit = "-"
-
-        if e["type"] == "IN":
-            running_balance += e["amount"]
-            credit = e["amount"]
+    running = 0
+    ledger = []
+    for r in rows:
+        credit = debit = "-"
+        if r["type"] == "IN":
+            running += r["amount"]
+            credit = r["amount"]
         else:
-            running_balance -= e["amount"]
-            debit = e["amount"]
+            running -= r["amount"]
+            debit = r["amount"]
 
-        ledger_entries.append({
-            "id": e["id"],
-            "date": e["date"],
-            "person": e["person"],
+        ledger.append({
+            "date": r["date"],
+            "person": r["person"],
             "credit": credit,
             "debit": debit,
-            "balance": running_balance
+            "balance": running
         })
 
-    total_in = sum(e["amount"] for e in entries if e["type"] == "IN")
-    total_out = sum(e["amount"] for e in entries if e["type"] == "OUT")
-    balance = total_in - total_out
-
-    today = datetime.now().strftime("%Y-%m-%d")
-
     conn.close()
-
     return render_template(
-        "dashboard.html",
-        entries=ledger_entries,
-        total_in=total_in,
-        total_out=total_out,
-        balance=balance,
-        today=today,
-        user=session["user_name"],
-        datetime=datetime
-    )
+    "dashboard.html",
+    entries=ledger,
+    user=session["user_name"],
+    datetime=datetime
+)
 
-# ---------- DELETE ----------
-@app.route("/delete", methods=["POST"])
-def delete_entry():
+# ---------- PDF ----------
+@app.route("/download-pdf")
+def download_pdf():
     if "user_id" not in session:
         return redirect("/login")
 
-    entry_id = request.form["id"]
-
     conn = get_db()
-    conn.execute(
-        "DELETE FROM entries WHERE id=? AND user_id=?",
-        (entry_id, session["user_id"])
-    )
-    conn.commit()
+    rows = conn.execute(
+        "SELECT * FROM entries WHERE user_id=? ORDER BY date, id",
+        (session["user_id"],)
+    ).fetchall()
     conn.close()
 
-    flash("Entry deleted", "danger")
-    return redirect("/dashboard")
+    # ----- LEDGER DATA -----
+    balance = 0
+    data = []
+    for r in rows:
+        credit = debit = "-"
+        if r["type"] == "IN":
+            balance += r["amount"]
+            credit = f"₹ {r['amount']}"
+        else:
+            balance -= r["amount"]
+            debit = f"₹ {r['amount']}"
+
+        data.append((r["date"], r["person"], credit, debit, f"₹ {balance}"))
+
+    file_path = "netlink_report.pdf"
+    c = canvas.Canvas(file_path, pagesize=A4)
+    width, height = A4
+
+    # ----- TITLE (BOLD + CENTER) -----
+    c.setFont("Helvetica-Bold", 18)
+    c.drawCentredString(width / 2, height - 60, "Netlink Report")
+
+    # ----- TABLE -----
+    start_x = 60
+    start_y = height - 120
+    row_h = 30
+
+    col_w = [90, 120, 90, 90, 100]
+    x = [start_x]
+    for w in col_w:
+        x.append(x[-1] + w)
+
+    # ----- HEADINGS (BOLD) -----
+    headers = ["Date", "Person", "Credit", "Debit", "Balance"]
+    c.setFont("Helvetica-Bold", 11)
+
+    y = start_y
+    for i, h in enumerate(headers):
+        c.drawCentredString((x[i] + x[i+1]) / 2, y, h)
+
+    c.line(x[0], y-10, x[-1], y-10)
+
+    # ----- ROWS -----
+    c.setFont("Helvetica", 10)
+    y -= row_h
+
+    for row in data:
+        for i, val in enumerate(row):
+            c.drawCentredString((x[i] + x[i+1]) / 2, y, val)
+        y -= row_h
+
+    # ----- BORDERS -----
+    bottom = y + row_h - 10
+    for xi in x:
+        c.line(xi, start_y+10, xi, bottom)
+
+    c.rect(x[0], bottom, x[-1]-x[0], (start_y+10)-bottom)
+
+    c.save()
+    return send_file(file_path, as_attachment=True)
 
 # ---------- RUN ----------
 if __name__ == "__main__":
