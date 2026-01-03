@@ -1,32 +1,28 @@
 from flask import Flask, render_template, request, redirect, send_file, flash, session
 import sqlite3
-from datetime import datetime, date
+from datetime import date
 from werkzeug.security import generate_password_hash, check_password_hash
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 import os
 
-# ---------- APP ----------
 app = Flask(__name__)
 app.secret_key = "khatabook-secret-key"
 DB = "khatabook.db"
 
-# ---------- FONT (RENDER SAFE) ----------
+# ---------- FONT SAFE ----------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FONT_PATH = os.path.join(BASE_DIR, "static", "fonts", "DejaVuSans.ttf")
 
-FONT_NAME = "Helvetica"   # default safe font
-
+FONT_NAME = "Helvetica"
 if os.path.exists(FONT_PATH):
     try:
         pdfmetrics.registerFont(TTFont("DejaVu", FONT_PATH))
         FONT_NAME = "DejaVu"
-    except Exception as e:
-        print("Font load failed, using Helvetica:", e)
-else:
-    print("Font file not found, using Helvetica")
+    except:
+        pass
 
 # ---------- DB ----------
 def get_db():
@@ -37,7 +33,7 @@ def get_db():
 def init_db():
     conn = get_db()
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
+        CREATE TABLE IF NOT EXISTS users(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT,
             email TEXT UNIQUE,
@@ -45,7 +41,7 @@ def init_db():
         )
     """)
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS entries (
+        CREATE TABLE IF NOT EXISTS entries(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             person TEXT,
@@ -59,33 +55,12 @@ def init_db():
 
 init_db()
 
-# ---------- ROUTES ----------
+# ---------- AUTH ----------
 @app.route("/")
 def home():
     return redirect("/login")
 
-@app.route("/register", methods=["GET", "POST"])
-def register():
-    if request.method == "POST":
-        try:
-            conn = get_db()
-            conn.execute(
-                "INSERT INTO users (name,email,password) VALUES (?,?,?)",
-                (
-                    request.form["name"],
-                    request.form["email"],
-                    generate_password_hash(request.form["password"])
-                )
-            )
-            conn.commit()
-            conn.close()
-            flash("Registration successful", "success")
-            return redirect("/login")
-        except:
-            flash("Email already exists", "danger")
-    return render_template("register.html")
-
-@app.route("/login", methods=["GET", "POST"])
+@app.route("/login", methods=["GET","POST"])
 def login():
     if request.method == "POST":
         conn = get_db()
@@ -101,6 +76,7 @@ def login():
             return redirect("/dashboard")
 
         flash("Invalid login", "danger")
+
     return render_template("login.html")
 
 @app.route("/logout")
@@ -109,7 +85,7 @@ def logout():
     return redirect("/login")
 
 # ---------- DASHBOARD ----------
-@app.route("/dashboard", methods=["GET", "POST"])
+@app.route("/dashboard", methods=["GET","POST"])
 def dashboard():
     if "user_id" not in session:
         return redirect("/login")
@@ -117,10 +93,9 @@ def dashboard():
     conn = get_db()
     cur = conn.cursor()
 
-    # ADD ENTRY
     if request.method == "POST":
         cur.execute(
-            "INSERT INTO entries (user_id,person,amount,type,date) VALUES (?,?,?,?,?)",
+            "INSERT INTO entries(user_id,person,amount,type,date) VALUES (?,?,?,?,?)",
             (
                 session["user_id"],
                 request.form["person"],
@@ -137,21 +112,20 @@ def dashboard():
         (session["user_id"],)
     ).fetchall()
 
-    # CALCULATIONS
     running = 0
-    total_credit = 0
-    total_debit = 0
+    total_in = 0
+    total_out = 0
     ledger = []
 
     for r in rows:
         credit = debit = "-"
         if r["type"] == "IN":
             running += r["amount"]
-            total_credit += r["amount"]
+            total_in += r["amount"]
             credit = r["amount"]
         else:
             running -= r["amount"]
-            total_debit += r["amount"]
+            total_out += r["amount"]
             debit = r["amount"]
 
         ledger.append({
@@ -166,15 +140,14 @@ def dashboard():
 
     return render_template(
         "dashboard.html",
-        entries=ledger,
         user=session["user_name"],
-        total_credit=total_credit,
-        total_debit=total_debit,
+        entries=ledger,
+        total_in=total_in,
+        total_out=total_out,
         balance=running,
         today=date.today().isoformat()
     )
 
-# ---------- PDF ----------
 # ---------- PDF ----------
 @app.route("/download-pdf")
 def download_pdf():
@@ -204,51 +177,37 @@ def download_pdf():
 
     file_path = "netlink_report.pdf"
     c = canvas.Canvas(file_path, pagesize=A4)
-    width, height = A4
+    w, h = A4
 
-    # ----- TITLE -----
     c.setFont(FONT_NAME, 18)
-    c.drawCentredString(width / 2, height - 60, "Netlink Report")
+    c.drawCentredString(w/2, h-60, "Netlink Report")
 
-    # ----- TABLE SETUP -----
     start_x = 60
-    start_y = height - 120
-    row_h = 28
-    col_w = [90, 120, 90, 90, 100]
+    start_y = h - 120
+    row_h = 26
+    col_w = [90,120,90,90,100]
 
     x = [start_x]
-    for w in col_w:
-        x.append(x[-1] + w)
+    for cw in col_w:
+        x.append(x[-1] + cw)
 
-    # ----- HEADERS -----
-    headers = ["Date", "Person", "Credit", "Debit", "Balance"]
+    headers = ["Date","Person","Credit","Debit","Balance"]
     c.setFont(FONT_NAME, 11)
-
     y = start_y
-    for i, h in enumerate(headers):
-        c.drawCentredString((x[i] + x[i+1]) / 2, y, h)
 
-    c.line(x[0], y - 8, x[-1], y - 8)
+    for i,hdr in enumerate(headers):
+        c.drawCentredString((x[i]+x[i+1])/2, y, hdr)
 
-    # ----- ROWS -----
     c.setFont(FONT_NAME, 10)
     y -= row_h
 
     for row in data:
-        for i, val in enumerate(row):
-            c.drawCentredString((x[i] + x[i+1]) / 2, y, val)
+        for i,val in enumerate(row):
+            c.drawCentredString((x[i]+x[i+1])/2, y, val)
         y -= row_h
-
-    # ----- BORDERS -----
-    bottom = y + row_h - 8
-    for xi in x:
-        c.line(xi, start_y + 8, xi, bottom)
-
-    c.rect(x[0], bottom, x[-1] - x[0], (start_y + 8) - bottom)
 
     c.save()
     return send_file(file_path, as_attachment=True)
 
-# ---------- RUN ----------
 if __name__ == "__main__":
     app.run(debug=True)
